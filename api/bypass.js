@@ -1,17 +1,12 @@
 module.exports = async function handler(req, res) {
-  // Header CORS
-  res.setHeader('Access-Control-Allow-Credentials', true);
+  // Anti Cache & CORS Header
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, x-api-key'
-  );
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, x-api-key');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
 
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return;
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
   const secretKey = req.headers['x-api-key'] || req.query.apikey || req.body?.apikey;
   const targetUrl = req.query.url || req.body?.url;
@@ -33,56 +28,70 @@ module.exports = async function handler(req, res) {
 
     let bypassedUrl = null;
 
-    // METODE 1: Menggunakan Resolver Engine untuk nembus Cloudflare sfl.gl
+    // Engine 1: Resolver External VIP
     try {
-      const apiRes = await fetch(`https://api.bypass.vip/bypass?url=${encodeURIComponent(cleanUrl)}`, {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      });
-      const apiData = await apiRes.json();
-      if (apiData && apiData.destination) {
-        bypassedUrl = apiData.destination;
-      } else if (apiData && apiData.result) {
-        bypassedUrl = apiData.result;
+      const r1 = await fetch(`https://api.bypass.vip/bypass?url=${encodeURIComponent(cleanUrl)}`);
+      const d1 = await r1.json();
+      if (d1?.destination && !d1.destination.includes('sfl.gl') && !d1.destination.includes('safelinku')) {
+        bypassedUrl = d1.destination;
       }
     } catch (e) {}
 
-    // METODE 2: Dekoder Base64 Cadangan dari HTML
+    // Engine 2: Resolver External City
     if (!bypassedUrl) {
       try {
-        const response = await fetch(cleanUrl, {
-          method: 'GET',
-          redirect: 'follow',
+        const r2 = await fetch(`https://bypass.city/api/bypass?url=${encodeURIComponent(cleanUrl)}`);
+        const d2 = await r2.json();
+        if (d2?.destination && !d2.destination.includes('sfl.gl') && !d2.destination.includes('safelinku')) {
+          bypassedUrl = d2.destination;
+        }
+      } catch (e) {}
+    }
+
+    // Engine 3: Native AdLinkFly Parser (POST /links/go)
+    if (!bypassedUrl) {
+      try {
+        const resInit = await fetch(cleanUrl, {
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html'
           }
         });
-        const html = await response.text();
+        const html = await resInit.text();
+        const setCookie = resInit.headers.get('set-cookie');
+        
+        const csrf = html.match(/name="_csrfToken"\s+value="([^"]+)"/i)?.[1];
+        const adData = html.match(/name="ad_form_data"\s+value="([^"]+)"/i)?.[1];
 
-        const b64Regex = /aHR0c[a-zA-Z0-9+/=]+/g;
-        const b64Matches = html.match(b64Regex);
+        if (csrf && adData) {
+          const body = new URLSearchParams();
+          body.append('_csrfToken', csrf);
+          body.append('ad_form_data', adData);
 
-        if (b64Matches) {
-          for (const match of b64Matches) {
-            try {
-              let pad = match;
-              while (pad.length % 4 !== 0) pad += '=';
-              const decoded = Buffer.from(pad, 'base64').toString('utf-8');
-              if ((decoded.startsWith('http://') || decoded.startsWith('https://')) && !decoded.includes('sfl.gl') && !decoded.includes('safelinku')) {
-                bypassedUrl = decoded;
-                break;
-              }
-            } catch (e) {}
+          const parsedUrl = new URL(resInit.url);
+          const postRes = await fetch(`${parsedUrl.origin}/links/go`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+              'X-Requested-With': 'XMLHttpRequest',
+              'Referer': resInit.url,
+              'Cookie': setCookie || ''
+            },
+            body: body.toString()
+              });
+          const postData = await postRes.json();
+          if (postData?.url && !postData.url.includes('sfl.gl')) {
+            bypassedUrl = postData.url;
           }
         }
       } catch (e) {}
     }
 
-    // Jika gagal, kembalikan status 422 (bukan mengembalikan link sfl.gl yang sama)
+    // Validasi Akhir
     if (!bypassedUrl || bypassedUrl.includes('sfl.gl') || bypassedUrl.includes('safelinku')) {
-      return res.status(422).json({
+      return res.status(400).json({
         status: false,
-        message: "Gagal mengekstrak link asli dari shortener."
+        message: "Gagal mengekstrak link asli dari Safelinku."
       });
     }
 
