@@ -1,4 +1,19 @@
 module.exports = async function handler(req, res) {
+  // Tambahkan Header CORS agar diizinkan diakses dari HP / File Lokal
+  res.setHeader('Access-Control-Allow-Credentials', true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, x-api-key'
+  );
+
+  // Respons cepat untuk preflight request (OPTIONS)
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
   // Ambil API Key dan URL dari request
   const secretKey = req.headers['x-api-key'] || req.query.apikey || req.body?.apikey;
   const targetUrl = req.query.url || req.body?.url;
