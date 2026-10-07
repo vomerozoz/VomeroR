@@ -27,18 +27,16 @@ module.exports = async function handler(req, res) {
 
     let bypassedUrl = null;
 
-    // Helper validasi URL asli (memfilter teks error / pesan shutdown)
     const isValidDestination = (url) => {
       if (!url || typeof url !== 'string') return false;
       if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
-      const invalidKeywords = ['sfl.gl', 'safelinku', 'bypass.vip', 'discord', 'SHUT DOWN', 'LEECHERS'];
-      return !invalidKeywords.some(kw => url.toLowerCase().includes(kw.toLowerCase()));
+      const invalidKeywords = ['sfl.gl', 'safelinku', 'bypass.vip', 'discord', 'SHUT DOWN', 'LEECHERS', 'tutwuri.id', 'safelinkku.com', 'wpsafelink'];
+      return !invalidKeywords.some(kw => url.toLowerCase().includes(kw));
     };
 
-    // Helper Dekoder Base64
     const decodeB64 = (str) => {
       try {
-        let pad = str;
+        let pad = str.trim();
         while (pad.length % 4 !== 0) pad += '=';
         const decoded = Buffer.from(pad, 'base64').toString('utf-8');
         if (isValidDestination(decoded)) return decoded;
@@ -48,47 +46,72 @@ module.exports = async function handler(req, res) {
 
     // Engine 1: Bypass.city API
     try {
-      const r2 = await fetch(`https://bypass.city/api/bypass?url=${encodeURIComponent(cleanUrl)}`);
-      const d2 = await r2.json();
-      const dest = d2?.destination || d2?.result;
-      if (isValidDestination(dest)) {
-        bypassedUrl = dest;
-      }
+      const r1 = await fetch(`https://bypass.city/api/bypass?url=${encodeURIComponent(cleanUrl)}`);
+      const d1 = await r1.json();
+      const dest = d1?.destination || d1?.result;
+      if (isValidDestination(dest)) bypassedUrl = dest;
     } catch (e) {}
 
-    // Engine 2: Direct Redirect & Query Parameter (Base64)
+    // Engine 2: Deep HTML & Dynamic Form Resolver
     if (!bypassedUrl) {
       try {
         const fetchRes = await fetch(cleanUrl, {
           method: 'GET',
           redirect: 'follow',
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5'
           }
         });
-        
+
         const finalUrl = fetchRes.url;
         if (isValidDestination(finalUrl)) {
           bypassedUrl = finalUrl;
-        } else {
-          const u = new URL(finalUrl || cleanUrl);
-          const rParam = u.searchParams.get('r') || u.searchParams.get('url') || u.searchParams.get('link');
-          if (rParam) {
-            const dec = decodeB64(rParam);
-            if (dec) bypassedUrl = dec;
-          }
         }
 
         if (!bypassedUrl) {
           const html = await fetchRes.text();
-          const matches = html.match(/aHR0c[a-zA-Z0-9+/=]+/g);
-          if (matches) {
-            for (const m of matches) {
-              const dec = decodeB64(m);
-              if (dec) {
-                bypassedUrl = dec;
-                break;
+          const cookieHeader = fetchRes.headers.get('set-cookie') || '';
+
+          // Ekstraksi Base64 dari kode script HTML
+          const b64Matches = html.match(/(?:aHR0c[a-zA-Z0-9+/=]+)/g) || [];
+          for (const m of b64Matches) {
+            const dec = decodeB64(m);
+            if (dec) {
+              bypassedUrl = dec;
+              break;
+            }
+          }
+
+          // Ekstraksi Form AJAX AdLinkFly / Safelinku
+          if (!bypassedUrl) {
+            const csrf = html.match(/name="_csrfToken"\s+value="([^"]+)"/i)?.[1] || html.match(/name="csrfToken"\s+value="([^"]+)"/i)?.[1];
+            const adData = html.match(/name="ad_form_data"\s+value="([^"]+)"/i)?.[1];
+            const tokenFields = html.match(/name="_Token\[fields\]"\s+value="([^"]+)"/i)?.[1];
+
+            if (csrf && adData) {
+              const body = new URLSearchParams();
+              body.append('_csrfToken', csrf);
+              body.append('ad_form_data', adData);
+              if (tokenFields) body.append('_Token[fields]', tokenFields);
+
+              const parsedUrl = new URL(finalUrl || cleanUrl);
+              const postRes = await fetch(`${parsedUrl.origin}/links/go`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                  'X-Requested-With': 'XMLHttpRequest',
+                  'Referer': finalUrl,
+                  'Cookie': cookieHeader,
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                },
+                body: body.toString()
+              });
+
+              const postData = await postRes.json();
+              if (isValidDestination(postData?.url)) {
+                bypassedUrl = postData.url;
               }
             }
           }
@@ -96,46 +119,15 @@ module.exports = async function handler(req, res) {
       } catch (e) {}
     }
 
-    // Engine 3: Native AdLinkFly Parser (POST /links/go)
+    // Engine 3: Worker Resolver Backup
     if (!bypassedUrl) {
       try {
-        const resInit = await fetch(cleanUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html'
-          }
-        });
-        const html = await resInit.text();
-        const setCookie = resInit.headers.get('set-cookie');
-        
-        const csrf = html.match(/name="_csrfToken"\s+value="([^"]+)"/i)?.[1];
-        const adData = html.match(/name="ad_form_data"\s+value="([^"]+)"/i)?.[1];
-
-        if (csrf && adData) {
-          const body = new URLSearchParams();
-          body.append('_csrfToken', csrf);
-          body.append('ad_form_data', adData);
-
-          const parsedUrl = new URL(resInit.url);
-          const postRes = await fetch(`${parsedUrl.origin}/links/go`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-              'X-Requested-With': 'XMLHttpRequest',
-              'Referer': resInit.url,
-              'Cookie': setCookie || ''
-            },
-            body: body.toString()
-          });
-          const postData = await postRes.json();
-          if (isValidDestination(postData?.url)) {
-            bypassedUrl = postData.url;
-          }
-        }
+        const r3 = await fetch(`https://api.exray.workers.dev/bypass?url=${encodeURIComponent(cleanUrl)}`);
+        const d3 = await r3.json();
+        if (isValidDestination(d3?.url)) bypassedUrl = d3.url;
       } catch (e) {}
     }
 
-    // Validasi Akhir
     if (!isValidDestination(bypassedUrl)) {
       return res.status(400).json({
         status: false,
