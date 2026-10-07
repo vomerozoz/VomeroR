@@ -9,7 +9,7 @@ module.exports = async function handler(req, res) {
 
   const secretKey = req.headers['x-api-key'] || req.query.apikey || req.body?.apikey;
   const rawUrl = Array.isArray(req.query.url) ? req.query.url[0] : (req.query.url || req.body?.url);
-  const isDebug = req.query.debug === 'true';
+  const isDebug = req.query.debug === 'true' || req.query.debug === '1';
   const MY_SECRET_KEY = "vomerow_secret_key_123";
 
   if (secretKey !== MY_SECRET_KEY) {
@@ -39,91 +39,58 @@ module.exports = async function handler(req, res) {
       return !invalidKeywords.some(kw => url.toLowerCase().includes(kw));
     };
 
-    const decodeB64 = (str) => {
-      try {
-        let pad = str.trim();
-        while (pad.length % 4 !== 0) pad += '=';
-        const decoded = Buffer.from(pad, 'base64').toString('utf-8');
-        if (isValidDestination(decoded)) return decoded;
-      } catch (e) {}
-      return null;
-    };
-
-    // Engine 1: Public Bypass APIs
-    const apis = [
+    // Mesin 1: External API Resolver
+    const bypassServices = [
       `https://bypass.city/api/bypass?url=${encodeURIComponent(cleanUrl)}`,
-      `https://api.exray.workers.dev/bypass?url=${encodeURIComponent(cleanUrl)}`
+      `https://api.bypass.vip/bypass?url=${encodeURIComponent(cleanUrl)}`
     ];
 
-    for (const apiUrl of apis) {
+    for (const serviceUrl of bypassServices) {
       try {
-        const r = await fetch(apiUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const d = await r.json();
-        const dest = d?.destination || d?.result || d?.url;
-        if (isValidDestination(dest)) {
-          bypassedUrl = dest;
-          logs.push(`API Success: ${apiUrl} -> ${dest}`);
+        const response = await fetch(serviceUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        });
+        const data = await response.json();
+        const resultUrl = data?.destination || data?.result || data?.url;
+
+        if (isValidDestination(resultUrl)) {
+          bypassedUrl = resultUrl;
+          logs.push(`Servis Berhasil: ${serviceUrl} -> ${resultUrl}`);
           break;
+        } else {
+          logs.push(`Servis Gagal/Invalid: ${serviceUrl}`);
         }
       } catch (e) {
-        logs.push(`API Fail: ${apiUrl}`);
+        logs.push(`Servis Error (${serviceUrl}): ${e.message}`);
       }
     }
 
-    // Engine 2: Multi-Proxy HTML Extraction
+    // Mesin 2: Scraping Proxy kalau Mesin 1 belum dapet
     if (!bypassedUrl) {
-      const targets = [
-        cleanUrl,
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(cleanUrl)}`,
-        `https://corsproxy.io/?${encodeURIComponent(cleanUrl)}`
-      ];
+      try {
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(cleanUrl)}`;
+        const resProxy = await fetch(proxyUrl);
+        const dataProxy = await resProxy.json();
+        const html = dataProxy?.contents || '';
 
-      for (const target of targets) {
-        try {
-          const fetchRes = await fetch(target, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-            }
-          });
+        logs.push(`HTML Proxy Length: ${html.length}`);
 
-          const finalUrl = fetchRes.url;
-          if (isValidDestination(finalUrl)) {
-            bypassedUrl = finalUrl;
-            logs.push(`Direct Redirect: ${finalUrl}`);
-            break;
-          }
-
-          const html = await fetchRes.text();
-          logs.push(`Target ${target} HTML Len: ${html.length}`);
-
-          // Cari Base64
-          const b64Matches = html.match(/aHR0c[a-zA-Z0-9+/=]+/g) || [];
-          for (const m of b64Matches) {
-            const dec = decodeB64(m);
-            if (dec) {
-              bypassedUrl = dec;
-              logs.push(`Base64 Found: ${bypassedUrl}`);
+        // Ekstraksi Base64
+        const b64Matches = html.match(/aHR0c[a-zA-Z0-9+/=]+/g) || [];
+        for (const m of b64Matches) {
+          try {
+            let pad = m.trim();
+            while (pad.length % 4 !== 0) pad += '=';
+            const decoded = Buffer.from(pad, 'base64').toString('utf-8');
+            if (isValidDestination(decoded)) {
+              bypassedUrl = decoded;
+              logs.push(`Base64 Extracted: ${bypassedUrl}`);
               break;
             }
-          }
-          if (bypassedUrl) break;
-
-          // Cari JS variables & href
-          const urlMatches = html.match(/(?:href|url|location|go_url|link)["']?\s*[:=]\s*["'](https?:\/\/[^"'\s]+)["']/gi) || [];
-          for (const match of urlMatches) {
-            const extracted = match.match(/https?:\/\/[^"'\s]+/i)?.[0];
-            if (isValidDestination(extracted)) {
-              bypassedUrl = extracted;
-              logs.push(`JS Link Found: ${bypassedUrl}`);
-              break;
-            }
-          }
-          if (bypassedUrl) break;
-
-        } catch (e) {
-          logs.push(`Fetch Err: ${e.message}`);
+          } catch (e) {}
         }
+      } catch (e) {
+        logs.push(`Proxy Scraper Error: ${e.message}`);
       }
     }
 
