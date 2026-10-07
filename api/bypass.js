@@ -27,82 +27,116 @@ module.exports = async function handler(req, res) {
 
     let bypassedUrl = null;
 
+    // Helper validasi URL asli (memfilter teks error / pesan shutdown)
+    const isValidDestination = (url) => {
+      if (!url || typeof url !== 'string') return false;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
+      const invalidKeywords = ['sfl.gl', 'safelinku', 'bypass.vip', 'discord', 'SHUT DOWN', 'LEECHERS'];
+      return !invalidKeywords.some(kw => url.toLowerCase().includes(kw.toLowerCase()));
+    };
+
     // Helper Dekoder Base64
     const decodeB64 = (str) => {
       try {
         let pad = str;
         while (pad.length % 4 !== 0) pad += '=';
         const decoded = Buffer.from(pad, 'base64').toString('utf-8');
-        if ((decoded.startsWith('http://') || decoded.startsWith('https://')) && !decoded.includes('sfl.gl') && !decoded.includes('safelinku')) {
-          return decoded;
-        }
+        if (isValidDestination(decoded)) return decoded;
       } catch (e) {}
       return null;
     };
 
-    // Engine 1: Cek Redirect & Query Parameter (Base64)
+    // Engine 1: Bypass.city API
     try {
-      const fetchRes = await fetch(cleanUrl, {
-        method: 'GET',
-        redirect: 'follow',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-        }
-      });
-      
-      const finalUrl = fetchRes.url;
-      if (finalUrl && !finalUrl.includes('sfl.gl') && !finalUrl.includes('safelinku')) {
-        bypassedUrl = finalUrl;
-      } else {
-        const u = new URL(finalUrl || cleanUrl);
-        const rParam = u.searchParams.get('r') || u.searchParams.get('url') || u.searchParams.get('link');
-        if (rParam) {
-          const dec = decodeB64(rParam);
-          if (dec) bypassedUrl = dec;
-        }
-      }
-
-      if (!bypassedUrl) {
-        const html = await fetchRes.text();
-        const matches = html.match(/aHR0c[a-zA-Z0-9+/=]+/g);
-        if (matches) {
-          for (const m of matches) {
-            const dec = decodeB64(m);
-            if (dec) {
-              bypassedUrl = dec;
-              break;
-            }
-          }
-        }
+      const r2 = await fetch(`https://bypass.city/api/bypass?url=${encodeURIComponent(cleanUrl)}`);
+      const d2 = await r2.json();
+      const dest = d2?.destination || d2?.result;
+      if (isValidDestination(dest)) {
+        bypassedUrl = dest;
       }
     } catch (e) {}
 
-    // Engine 2: Resolver VIP External
+    // Engine 2: Direct Redirect & Query Parameter (Base64)
     if (!bypassedUrl) {
       try {
-        const r1 = await fetch(`https://api.bypass.vip/bypass?url=${encodeURIComponent(cleanUrl)}`);
-        const d1 = await r1.json();
-        const dest = d1?.destination || d1?.result;
-        if (dest && !dest.includes('sfl.gl') && !dest.includes('safelinku')) {
-          bypassedUrl = dest;
+        const fetchRes = await fetch(cleanUrl, {
+          method: 'GET',
+          redirect: 'follow',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          }
+        });
+        
+        const finalUrl = fetchRes.url;
+        if (isValidDestination(finalUrl)) {
+          bypassedUrl = finalUrl;
+        } else {
+          const u = new URL(finalUrl || cleanUrl);
+          const rParam = u.searchParams.get('r') || u.searchParams.get('url') || u.searchParams.get('link');
+          if (rParam) {
+            const dec = decodeB64(rParam);
+            if (dec) bypassedUrl = dec;
+          }
+        }
+
+        if (!bypassedUrl) {
+          const html = await fetchRes.text();
+          const matches = html.match(/aHR0c[a-zA-Z0-9+/=]+/g);
+          if (matches) {
+            for (const m of matches) {
+              const dec = decodeB64(m);
+              if (dec) {
+                bypassedUrl = dec;
+                break;
+              }
+            }
+          }
         }
       } catch (e) {}
     }
 
-    // Engine 3: Resolver City External
+    // Engine 3: Native AdLinkFly Parser (POST /links/go)
     if (!bypassedUrl) {
       try {
-        const r2 = await fetch(`https://bypass.city/api/bypass?url=${encodeURIComponent(cleanUrl)}`);
-        const d2 = await r2.json();
-        if (d2?.destination && !d2.destination.includes('sfl.gl') && !d2.destination.includes('safelinku')) {
-          bypassedUrl = d2.destination;
+        const resInit = await fetch(cleanUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html'
+          }
+        });
+        const html = await resInit.text();
+        const setCookie = resInit.headers.get('set-cookie');
+        
+        const csrf = html.match(/name="_csrfToken"\s+value="([^"]+)"/i)?.[1];
+        const adData = html.match(/name="ad_form_data"\s+value="([^"]+)"/i)?.[1];
+
+        if (csrf && adData) {
+          const body = new URLSearchParams();
+          body.append('_csrfToken', csrf);
+          body.append('ad_form_data', adData);
+
+          const parsedUrl = new URL(resInit.url);
+          const postRes = await fetch(`${parsedUrl.origin}/links/go`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+              'X-Requested-With': 'XMLHttpRequest',
+              'Referer': resInit.url,
+              'Cookie': setCookie || ''
+            },
+            body: body.toString()
+          });
+          const postData = await postRes.json();
+          if (isValidDestination(postData?.url)) {
+            bypassedUrl = postData.url;
+          }
         }
       } catch (e) {}
     }
 
     // Validasi Akhir
-    if (!bypassedUrl || bypassedUrl.includes('sfl.gl') || bypassedUrl.includes('safelinku')) {
+    if (!isValidDestination(bypassedUrl)) {
       return res.status(400).json({
         status: false,
         message: "Gagal mengekstrak link asli dari Safelinku."
