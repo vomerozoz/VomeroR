@@ -9,6 +9,7 @@ module.exports = async function handler(req, res) {
 
   const secretKey = req.headers['x-api-key'] || req.query.apikey || req.body?.apikey;
   const rawUrl = Array.isArray(req.query.url) ? req.query.url[0] : (req.query.url || req.body?.url);
+  const isDebug = req.query.debug === 'true';
   const MY_SECRET_KEY = "vomerow_secret_key_123";
 
   if (secretKey !== MY_SECRET_KEY) {
@@ -26,11 +27,12 @@ module.exports = async function handler(req, res) {
     }
 
     let bypassedUrl = null;
+    let logs = [];
 
     const isValidDestination = (url) => {
       if (!url || typeof url !== 'string') return false;
       if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
-      const invalidKeywords = ['sfl.gl', 'safelinku', 'bypass.vip', 'discord', 'SHUT DOWN', 'LEECHERS', 'tutwuri.id', 'safelinkku.com', 'wpsafelink'];
+      const invalidKeywords = ['sfl.gl', 'safelinku', 'bypass.vip', 'discord', 'SHUT DOWN', 'LEECHERS', 'tutwuri.id', 'safelinkku.com', 'wpsafelink', 'google.com/search'];
       return !invalidKeywords.some(kw => url.toLowerCase().includes(kw));
     };
 
@@ -50,51 +52,66 @@ module.exports = async function handler(req, res) {
       const d1 = await r1.json();
       const dest = d1?.destination || d1?.result;
       if (isValidDestination(dest)) bypassedUrl = dest;
-    } catch (e) {}
+      logs.push(`Engine1 Result: ${dest || 'null'}`);
+    } catch (e) {
+      logs.push(`Engine1 Error: ${e.message}`);
+    }
 
-    // Engine 2: Deep HTML & Dynamic Form Resolver
+    // Engine 2: Deep Redirect & Script Extraction
     if (!bypassedUrl) {
       try {
         const fetchRes = await fetch(cleanUrl, {
           method: 'GET',
           redirect: 'follow',
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5'
+            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8'
           }
         });
 
         const finalUrl = fetchRes.url;
+        logs.push(`Final URL: ${finalUrl}`);
+
         if (isValidDestination(finalUrl)) {
           bypassedUrl = finalUrl;
-        }
-
-        if (!bypassedUrl) {
+        } else {
           const html = await fetchRes.text();
-          const cookieHeader = fetchRes.headers.get('set-cookie') || '';
+          logs.push(`HTML Length: ${html.length}`);
 
-          // Ekstraksi Base64 dari kode script HTML
-          const b64Matches = html.match(/(?:aHR0c[a-zA-Z0-9+/=]+)/g) || [];
-          for (const m of b64Matches) {
-            const dec = decodeB64(m);
-            if (dec) {
-              bypassedUrl = dec;
+          // Cari tautan langsung dalam tag script (var go_url / location.href)
+          const scriptMatches = html.match(/(?:href|url|location|go_url)["']?\s*[:=]\s*["'](https?:\/\/[^"'\s]+)["']/gi) || [];
+          for (const match of scriptMatches) {
+            const extracted = match.match(/https?:\/\/[^"'\s]+/i)?.[0];
+            if (isValidDestination(extracted)) {
+              bypassedUrl = extracted;
+              logs.push(`Found in script: ${bypassedUrl}`);
               break;
             }
           }
 
-          // Ekstraksi Form AJAX AdLinkFly / Safelinku
+          // Dekode Base64 dalam HTML
+          if (!bypassedUrl) {
+            const b64Matches = html.match(/aHR0c[a-zA-Z0-9+/=]+/g) || [];
+            for (const m of b64Matches) {
+              const dec = decodeB64(m);
+              if (dec) {
+                bypassedUrl = dec;
+                logs.push(`Found Base64: ${bypassedUrl}`);
+                break;
+              }
+            }
+          }
+
+          // Ekstraksi Form AJAX
           if (!bypassedUrl) {
             const csrf = html.match(/name="_csrfToken"\s+value="([^"]+)"/i)?.[1] || html.match(/name="csrfToken"\s+value="([^"]+)"/i)?.[1];
             const adData = html.match(/name="ad_form_data"\s+value="([^"]+)"/i)?.[1];
-            const tokenFields = html.match(/name="_Token\[fields\]"\s+value="([^"]+)"/i)?.[1];
 
             if (csrf && adData) {
               const body = new URLSearchParams();
               body.append('_csrfToken', csrf);
               body.append('ad_form_data', adData);
-              if (tokenFields) body.append('_Token[fields]', tokenFields);
 
               const parsedUrl = new URL(finalUrl || cleanUrl);
               const postRes = await fetch(`${parsedUrl.origin}/links/go`, {
@@ -103,42 +120,38 @@ module.exports = async function handler(req, res) {
                   'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
                   'X-Requested-With': 'XMLHttpRequest',
                   'Referer': finalUrl,
-                  'Cookie': cookieHeader,
-                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                  'Cookie': fetchRes.headers.get('set-cookie') || '',
+                  'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36'
                 },
                 body: body.toString()
               });
 
-              const postData = await postRes.json();
+              const postData = await postRes.json().catch(() => ({}));
               if (isValidDestination(postData?.url)) {
                 bypassedUrl = postData.url;
               }
+              logs.push(`AJAX POST Result: ${JSON.stringify(postData)}`);
             }
           }
         }
-      } catch (e) {}
-    }
-
-    // Engine 3: Worker Resolver Backup
-    if (!bypassedUrl) {
-      try {
-        const r3 = await fetch(`https://api.exray.workers.dev/bypass?url=${encodeURIComponent(cleanUrl)}`);
-        const d3 = await r3.json();
-        if (isValidDestination(d3?.url)) bypassedUrl = d3.url;
-      } catch (e) {}
+      } catch (e) {
+        logs.push(`Engine2 Error: ${e.message}`);
+      }
     }
 
     if (!isValidDestination(bypassedUrl)) {
       return res.status(400).json({
         status: false,
-        message: "Gagal mengekstrak link asli dari Safelinku."
+        message: "Gagal mengekstrak link asli dari Safelinku.",
+        debug_info: isDebug ? logs : undefined
       });
     }
 
     return res.status(200).json({
       status: true,
       original_url: cleanUrl,
-      result: bypassedUrl
+      result: bypassedUrl,
+      debug_info: isDebug ? logs : undefined
     });
 
   } catch (err) {
